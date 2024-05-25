@@ -1,5 +1,46 @@
 #include "esp_wifi_downloader.h"
 
+void writeDownloadsPath(FuriString* str, const char* fName) {
+    furi_string_printf(str, "/data/%s", fName);
+}
+
+int create_file(ESPWifiDownloader* app) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+
+    // Allocate file
+    File* file = storage_file_alloc(storage);
+    int code = 0;
+    if(!storage_file_open(file, furi_string_get_cstr(app->fpath), FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
+        FURI_LOG_D(TAG, "Failed to open file");
+        code = -1;
+    }
+
+    storage_file_close(file);
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+
+    return code;
+}
+
+int append_file(ESPWifiDownloader* app) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+
+    // Allocate file
+    File* file = storage_file_alloc(storage);
+    int code = 0;
+    if(!storage_file_open(file, furi_string_get_cstr(app->fpath), FSAM_WRITE, FSOM_OPEN_APPEND)) {
+        FURI_LOG_D(TAG, "Failed to append file");
+        code = -1;
+    } else
+        storage_file_write(file, app->rx_buf, app->recv_bytes);
+
+    storage_file_close(file);
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+
+    return code;
+}
+
 void config_write(ESPWifiDownloader* app) {
     // Open storage
     Storage* storage = furi_record_open(RECORD_STORAGE);
@@ -10,7 +51,9 @@ void config_write(ESPWifiDownloader* app) {
     if(!storage_file_open(file, APP_DATA_PATH("cfg.txt"), FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
         storage_file_free(file);
         furi_record_close(RECORD_STORAGE);
+        storage_file_close(file);
         FURI_LOG_D(TAG, "Failed to open file ");
+        return;
     }
 
     size_t ssid_len = strlen(app->ssid);
@@ -224,11 +267,31 @@ void handle_cmd(void* context) {
 
     if(furi_string_equal_str(cmd, WIFI_INFO)) {
         app->expect_bytes = 1;
-        app->expect_event = DataEventPackSize;
-        popup_set_header(app->popup, "Connection Successfull", 64, 10, AlignCenter, AlignTop);
-    } else if(furi_string_equal_str(cmd, WIFI_INFO))
+        app->expect_event = DataEventWiFiConnInfoSize;
+    } else if(furi_string_equal_str(cmd, WL_NO_SSID_AVAIL)) {
+        furi_string_printf(app->popup_text, "This SSID is not available");
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+    } else if(furi_string_equal_str(cmd, WL_CONNECT_FAILED)) {
+        furi_string_printf(app->popup_text, "WiFi connection failed");
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+    } else if(furi_string_equal_str(cmd, WL_CONNECTION_LOST)) {
+        furi_string_printf(app->popup_text, "WiFi connection lost");
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+    } else if(furi_string_equal_str(cmd, WL_NO_SHIELD)) {
+        furi_string_printf(app->popup_text, "No shield");
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+    } else if(furi_string_equal_str(cmd, TRANSFER_BEGIN)) {
+        app->expect_bytes = 1;
+        app->expect_event = DataEventFileNameSize;
+    } else if(furi_string_equal_str(cmd, FILE_PART)) {
+        app->expect_bytes = 1;
+        app->expect_event = DataEventFilePartSize;
+    } else if(furi_string_equal_str(cmd, TRANSFER_END)) {
+        furi_string_printf(app->popup_text, "Successfully written file");
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+    }
 
-        furi_string_free(cmd);
+    furi_string_free(cmd);
 }
 
 void handle_recv(void* context) {
@@ -239,16 +302,43 @@ void handle_recv(void* context) {
         app->rx_buf[app->recv_bytes] = '\0';
         handle_cmd(app);
         break;
-    case DataEventPackSize:
+    case DataEventWiFiConnInfoSize:
         app->expect_bytes = app->rx_buf[0];
-        app->expect_event = DataEventData;
+        app->expect_event = DataEventWiFiConnInfo;
         break;
-    case DataEventData:
+    case DataEventFileNameSize:
+        app->expect_bytes = app->rx_buf[0];
+        app->expect_event = DataEventFileName;
+        break;
+    case DataEventFilePartSize:
+        app->expect_bytes = app->rx_buf[0];
+        app->expect_event = DataEventFilePart;
+        break;
+    case DataEventWiFiConnInfo:
         app->rx_buf[app->recv_bytes] = '\0';
         app->expect_bytes = CMD_LEN;
         app->expect_event = DataEventCmd;
-        furi_string_printf(app->popup_text, "%s", app->rx_buf);
+        furi_string_printf(app->popup_text, "Server address:\n%s", app->rx_buf);
         scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+        break;
+    case DataEventFileName:
+        app->rx_buf[app->recv_bytes] = '\0';
+        app->expect_bytes = CMD_LEN;
+        app->expect_event = DataEventCmd;
+        furi_string_printf(app->popup_text, "Receiving file: %s", app->rx_buf);
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+        writeDownloadsPath(app->fpath, (const char*)app->rx_buf);
+        create_file(app);
+        break;
+    case DataEventFilePart:
+        app->expect_bytes = 1;
+        app->expect_event = DataEventSum;
+        append_file(app);
+        break;
+    case DataEventSum:
+        app->expect_bytes = CMD_LEN;
+        app->expect_event = DataEventCmd;
+        // furi_hal_serial_tx(app->serial_handle, (uint8_t*)("ACK\n"), 4);
         break;
     default:
         break;
@@ -270,7 +360,7 @@ static int32_t uart_worker(void* context) {
                 app->rx_stream,
                 app->rx_buf + app->recv_bytes,
                 UART_BUFFER_SIZE - app->recv_bytes,
-                0);
+                FuriWaitForever);
             if(len > 0) {
                 app->recv_bytes += len;
                 if(app->recv_bytes >= app->expect_bytes) {
@@ -308,12 +398,13 @@ void esp_wifi_downloader_scene_on_enter_popup_two(void* context) {
         return;
     }
 
-    popup_set_header(app->popup, "Connecting to WiFi", 64, 10, AlignCenter, AlignTop);
-    popup_set_text(app->popup, "Please do not close this menu", 64, 30, AlignCenter, AlignCenter);
+    popup_set_header(app->popup, "Connection Status", 64, 10, AlignCenter, AlignTop);
+    popup_set_text(app->popup, "Trying to connect...", 64, 30, AlignCenter, AlignCenter);
 
     app->rx_stream = furi_stream_buffer_alloc(UART_BUFFER_SIZE, 1);
     app->rx_thread = furi_thread_alloc();
     app->popup_text = furi_string_alloc();
+    app->fpath = furi_string_alloc();
     furi_thread_set_name(app->rx_thread, "ESPWifiDownloader_UartRxThread");
     furi_thread_set_stack_size(app->rx_thread, BUFSIZ);
     furi_thread_set_context(app->rx_thread, app);
@@ -371,6 +462,7 @@ void esp_wifi_downloader_scene_on_exit_popup_two(void* context) {
         furi_thread_join(app->rx_thread);
         furi_thread_free(app->rx_thread);
         furi_string_free(app->popup_text);
+        furi_string_free(app->fpath);
     }
 
     popup_reset(app->popup);

@@ -18,9 +18,7 @@
 #define CFG_FILE_SIZE (ESP_WIFI_DOWNLOADER_TEXT_INPUT_STORE_SIZE * 2 + 2)
 #define CONFIG_ITEMS (2)
 #define APP_FOLDER "esp_wifi_downloader"
-#define DOWNLOADER_DATA_FOLDER STORAGE_APP_DATA_PATH_PREFIX "/" APP_FOLDER "/"
-#define DOWNLOADER_DATA_PATH(path) DOWNLOADER_DATA_FOLDER path
-#define DOWNLOADER_DATA_DOWNLOADS(path) DOWNLOADER_DATA_FOLDER "/downloads" path
+#define DOWNLOADER_DATA_DOWNLOADS(path) STORAGE_APP_DATA_PATH_PREFIX "/downloads/" path
 
 #define TRANSFER_BEGIN "BGN"
 #define TRANSFER_END "FIN"
@@ -62,8 +60,13 @@ typedef enum {
 /** ids for the 2 types of view used by the app */
 typedef enum {
     DataEventCmd,
-    DataEventPackSize,
-    DataEventData,
+    DataEventSum,
+    DataEventWiFiConnInfoSize,
+    DataEventFileNameSize,
+    DataEventFileName,
+    DataEventWiFiConnInfo,
+    DataEventFilePartSize,
+    DataEventFilePart,
 } DataEvent;
 
 /** the app context struct */
@@ -82,6 +85,7 @@ typedef struct {
     FuriThread* rx_thread;
     FuriStreamBuffer* rx_stream;
     FuriString* popup_text;
+    FuriString* fpath;
     uint8_t rx_buf[UART_BUFFER_SIZE + 1];
     FuriHalSerialHandle* serial_handle;
     bool rx_init;
