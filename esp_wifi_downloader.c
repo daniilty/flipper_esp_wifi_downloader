@@ -1,44 +1,35 @@
 #include "esp_wifi_downloader.h"
 
-void writeDownloadsPath(FuriString* str, const char* fName) {
-    furi_string_printf(str, "/data/%s", fName);
-}
-
-int create_file(ESPWifiDownloader* app) {
-    Storage* storage = furi_record_open(RECORD_STORAGE);
-
-    // Allocate file
-    File* file = storage_file_alloc(storage);
-    int code = 0;
-    if(!storage_file_open(file, furi_string_get_cstr(app->fpath), FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
-        FURI_LOG_D(TAG, "Failed to open file");
-        code = -1;
+bool create_file(ESPWifiDownloader* app) {
+    if(app->cur_open_f) {
+        storage_file_close(app->cur_open_f);
+        storage_file_free(app->cur_open_f);
     }
+    app->cur_open_f = storage_file_alloc(app->storage);
+    bool ok = true;
 
-    storage_file_close(file);
-    storage_file_free(file);
-    furi_record_close(RECORD_STORAGE);
+    ok = storage_file_open(
+        app->cur_open_f, furi_string_get_cstr(app->fpath), FSAM_WRITE, FSOM_CREATE_ALWAYS);
 
-    return code;
+    return ok;
 }
 
-int append_file(ESPWifiDownloader* app) {
-    Storage* storage = furi_record_open(RECORD_STORAGE);
+bool append_file(ESPWifiDownloader* app, uint8_t* buf, size_t len) {
+    if(!app->cur_open_f) return false;
 
-    // Allocate file
-    File* file = storage_file_alloc(storage);
-    int code = 0;
-    if(!storage_file_open(file, furi_string_get_cstr(app->fpath), FSAM_WRITE, FSOM_OPEN_APPEND)) {
-        FURI_LOG_D(TAG, "Failed to append file");
-        code = -1;
-    } else
-        storage_file_write(file, app->rx_buf, app->recv_bytes);
+    app->cur_bytes_w += len;
+    storage_file_write(app->cur_open_f, buf, len);
 
-    storage_file_close(file);
-    storage_file_free(file);
-    furi_record_close(RECORD_STORAGE);
+    return true;
+}
 
-    return code;
+void close_file(ESPWifiDownloader* app) {
+    if(!app->cur_open_f) return;
+
+    app->cur_bytes_w = 0;
+    storage_file_close(app->cur_open_f);
+    storage_file_free(app->cur_open_f);
+    app->cur_open_f = NULL;
 }
 
 void config_write(ESPWifiDownloader* app) {
@@ -262,89 +253,92 @@ void esp_wifi_downloader_scene_on_exit_config(void* context) {
 
 void handle_cmd(void* context) {
     ESPWifiDownloader* app = context;
-    FuriString* cmd = furi_string_alloc();
-    furi_string_printf(cmd, "%s", app->rx_buf);
 
-    if(furi_string_equal_str(cmd, WIFI_INFO)) {
-        app->expect_bytes = 1;
-        app->expect_event = DataEventWiFiConnInfoSize;
-    } else if(furi_string_equal_str(cmd, WL_NO_SSID_AVAIL)) {
-        furi_string_printf(app->popup_text, "This SSID is not available");
-        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
-    } else if(furi_string_equal_str(cmd, WL_CONNECT_FAILED)) {
-        furi_string_printf(app->popup_text, "WiFi connection failed");
-        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
-    } else if(furi_string_equal_str(cmd, WL_CONNECTION_LOST)) {
-        furi_string_printf(app->popup_text, "WiFi connection lost");
-        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
-    } else if(furi_string_equal_str(cmd, WL_NO_SHIELD)) {
-        furi_string_printf(app->popup_text, "No shield");
-        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
-    } else if(furi_string_equal_str(cmd, TRANSFER_BEGIN)) {
-        app->expect_bytes = 1;
-        app->expect_event = DataEventFileNameSize;
-    } else if(furi_string_equal_str(cmd, FILE_PART)) {
-        app->expect_bytes = 1;
-        app->expect_event = DataEventFilePartSize;
-    } else if(furi_string_equal_str(cmd, TRANSFER_END)) {
-        furi_string_printf(app->popup_text, "Successfully written file");
-        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
-    }
-
-    furi_string_free(cmd);
-}
-
-void handle_recv(void* context) {
-    ESPWifiDownloader* app = context;
-
-    switch(app->expect_event) {
-    case DataEventCmd:
-        app->rx_buf[app->recv_bytes] = '\0';
-        handle_cmd(app);
-        break;
-    case DataEventWiFiConnInfoSize:
-        app->expect_bytes = app->rx_buf[0];
+    switch(app->rx_buf[0]) {
+    case WIFI_INFO:
         app->expect_event = DataEventWiFiConnInfo;
         break;
-    case DataEventFileNameSize:
-        app->expect_bytes = app->rx_buf[0];
+    case WL_NO_SSID_AVAIL:
+        furi_string_printf(app->popup_text, "This SSID is not available");
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+        break;
+    case WL_CONNECT_FAILED:
+        furi_string_printf(app->popup_text, "WiFi connection failed");
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+        break;
+    case WL_CONNECTION_LOST:
+        furi_string_printf(app->popup_text, "WiFi connection lost");
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+        break;
+    case WL_NO_SHIELD:
+        furi_string_printf(app->popup_text, "No shield");
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+        break;
+    case TRANSFER_BEGIN:
         app->expect_event = DataEventFileName;
-        break;
-    case DataEventFilePartSize:
-        app->expect_bytes = app->rx_buf[0];
-        app->expect_event = DataEventFilePart;
-        break;
-    case DataEventWiFiConnInfo:
-        app->rx_buf[app->recv_bytes] = '\0';
-        app->expect_bytes = CMD_LEN;
-        app->expect_event = DataEventCmd;
-        furi_string_printf(app->popup_text, "Server address:\n%s", app->rx_buf);
-        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
-        break;
-    case DataEventFileName:
-        app->rx_buf[app->recv_bytes] = '\0';
-        app->expect_bytes = CMD_LEN;
-        app->expect_event = DataEventCmd;
-        furi_string_printf(app->popup_text, "Receiving file: %s", app->rx_buf);
-        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
-        writeDownloadsPath(app->fpath, (const char*)app->rx_buf);
-        create_file(app);
-        break;
-    case DataEventFilePart:
-        app->expect_bytes = 1;
-        app->expect_event = DataEventSum;
-        append_file(app);
-        break;
-    case DataEventSum:
-        app->expect_bytes = CMD_LEN;
-        app->expect_event = DataEventCmd;
-        // furi_hal_serial_tx(app->serial_handle, (uint8_t*)("ACK\n"), 4);
         break;
     default:
         break;
     }
+}
 
-    app->recv_bytes = 0;
+void handle_recv(void* context, size_t len) {
+    ESPWifiDownloader* app = context;
+
+    switch(app->expect_event) {
+    case DataEventCmd:
+        handle_cmd(app);
+        break;
+    case DataEventWiFiConnInfo:
+        if(app->rx_buf[len - 1] == '\0') {
+            furi_string_cat_printf(app->conn_info, "%s", app->rx_buf);
+            furi_string_printf(
+                app->popup_text, "Server address:\n%s", furi_string_get_cstr(app->conn_info));
+            scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+            app->expect_event = DataEventCmd;
+
+            break;
+        }
+
+        app->rx_buf[len] = '\0';
+        furi_string_cat_printf(app->conn_info, "%s", app->rx_buf);
+        break;
+    case DataEventFileName:
+        if(app->rx_buf[len - 1] == '\0') {
+            furi_string_cat_printf(app->fname, "%s", app->rx_buf);
+            furi_string_printf(app->fpath, "/data/downloads/%s", furi_string_get_cstr(app->fname));
+            create_file(app);
+            furi_string_printf(
+                app->popup_text, "Receiving file: %s", furi_string_get_cstr(app->fname));
+            scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+            app->expect_event = DataEventFilePart;
+
+            break;
+        }
+
+        app->rx_buf[len] = '\0';
+        furi_string_cat_printf(app->fname, "%s", app->rx_buf);
+        break;
+    case DataEventFilePart:
+        if(app->rx_buf[len - 1] == '\0') {
+            append_file(app, app->rx_buf, len - 1);
+
+            // transfer end
+            app->expect_event = DataEventCmd;
+            furi_string_printf(app->popup_text, "Successfully written %d bytes", app->cur_bytes_w);
+            close_file(app);
+            scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+
+            break;
+        }
+
+        append_file(app, app->rx_buf, len);
+        break;
+    default:
+        furi_string_printf(app->popup_text, "Unknown event: %d", app->rx_buf[0]);
+        scene_manager_handle_custom_event(app->scene_manager, CMDPopupTextEvent_Update);
+        break;
+    }
 }
 
 static int32_t uart_worker(void* context) {
@@ -356,16 +350,10 @@ static int32_t uart_worker(void* context) {
         furi_check((events & FuriFlagError) == 0);
         if(events & WorkerEvtStop) break;
         if(events & WorkerEvtRxDone) {
-            size_t len = furi_stream_buffer_receive(
-                app->rx_stream,
-                app->rx_buf + app->recv_bytes,
-                UART_BUFFER_SIZE - app->recv_bytes,
-                FuriWaitForever);
+            size_t len =
+                furi_stream_buffer_receive(app->rx_stream, app->rx_buf, UART_BUFFER_SIZE, 0);
             if(len > 0) {
-                app->recv_bytes += len;
-                if(app->recv_bytes >= app->expect_bytes) {
-                    handle_recv(app);
-                }
+                handle_recv(app, len);
             }
         }
     }
@@ -375,15 +363,13 @@ static int32_t uart_worker(void* context) {
     return 0;
 }
 
-void uart_terminal_uart_on_irq_cb(
-    FuriHalSerialHandle* handle,
-    FuriHalSerialRxEvent event,
-    void* context) {
+void uart_on_irq_cb(FuriHalSerialHandle* handle, FuriHalSerialRxEvent event, void* context) {
     ESPWifiDownloader* app = context;
 
     if(event == FuriHalSerialRxEventData) {
-        uint8_t data = furi_hal_serial_async_rx(handle);
-        furi_stream_buffer_send(app->rx_stream, &data, 1, 0);
+        uint8_t dat = furi_hal_serial_async_rx(handle);
+        while(0 == furi_stream_buffer_send(app->rx_stream, &dat, 1, 0)) {
+        }
         furi_thread_flags_set(furi_thread_get_id(app->rx_thread), WorkerEvtRxDone);
     }
 }
@@ -405,8 +391,11 @@ void esp_wifi_downloader_scene_on_enter_popup_two(void* context) {
     app->rx_thread = furi_thread_alloc();
     app->popup_text = furi_string_alloc();
     app->fpath = furi_string_alloc();
+    app->fname = furi_string_alloc();
+    app->conn_info = furi_string_alloc();
+    app->storage = furi_record_open(RECORD_STORAGE);
     furi_thread_set_name(app->rx_thread, "ESPWifiDownloader_UartRxThread");
-    furi_thread_set_stack_size(app->rx_thread, BUFSIZ);
+    furi_thread_set_stack_size(app->rx_thread, UART_BUFFER_SIZE);
     furi_thread_set_context(app->rx_thread, app);
     furi_thread_set_callback(app->rx_thread, uart_worker);
     furi_thread_start(app->rx_thread);
@@ -415,9 +404,7 @@ void esp_wifi_downloader_scene_on_enter_popup_two(void* context) {
     furi_check(app->serial_handle);
     furi_hal_serial_init(app->serial_handle, BAUDRATE);
     app->rx_init = true;
-
-    furi_hal_serial_async_rx_start(app->serial_handle, uart_terminal_uart_on_irq_cb, app, false);
-    furi_hal_serial_tx(app->serial_handle, (uint8_t*)("WSP\n"), 4);
+    furi_hal_serial_async_rx_start(app->serial_handle, uart_on_irq_cb, app, false);
     furi_hal_serial_tx(
         app->serial_handle, (uint8_t*)(app->cfg_file_buf), strlen(app->cfg_file_buf));
     furi_hal_serial_tx(app->serial_handle, (uint8_t*)("\n"), 1);
@@ -463,6 +450,10 @@ void esp_wifi_downloader_scene_on_exit_popup_two(void* context) {
         furi_thread_free(app->rx_thread);
         furi_string_free(app->popup_text);
         furi_string_free(app->fpath);
+        furi_string_free(app->fname);
+        furi_string_free(app->conn_info);
+        furi_record_close(RECORD_STORAGE);
+        close_file(app);
     }
 
     popup_reset(app->popup);
@@ -651,7 +642,6 @@ void init_ssid_password_from_config(ESPWifiDownloader* app) {
 ESPWifiDownloader* esp_wifi_downloader_init() {
     FURI_LOG_T(TAG, "esp_wifi_downloader_init");
     ESPWifiDownloader* app = malloc(sizeof(ESPWifiDownloader));
-    app->expect_bytes = CMD_LEN;
     app->expect_event = DataEventCmd;
 
     init_ssid_password_from_config(app);
