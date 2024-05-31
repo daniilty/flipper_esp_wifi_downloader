@@ -394,6 +394,8 @@ void esp_wifi_downloader_scene_on_enter_popup_two(void* context) {
     app->fname = furi_string_alloc();
     app->conn_info = furi_string_alloc();
     app->storage = furi_record_open(RECORD_STORAGE);
+    if(!storage_dir_exists(app->storage, "/data/downloads"))
+        storage_common_mkdir(app->storage, "/data/downloads");
     furi_thread_set_name(app->rx_thread, "ESPWifiDownloader_UartRxThread");
     furi_thread_set_stack_size(app->rx_thread, UART_BUFFER_SIZE);
     furi_thread_set_context(app->rx_thread, app);
